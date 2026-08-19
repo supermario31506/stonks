@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Stock Market Chart</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+        }
+
+        body {
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            width: 1200px;
+            height: 800px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8);
+        }
+
+        canvas {
+            display: block;
+            cursor: default;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="marketCanvas" width="1200" height="800"></canvas>
+</div>
+
+<script>
+// --- Constants & Configuration ---
+const WIDTH = 1200;
+const HEIGHT = 800;
+
+// Colors (R, G, B matching Python)
+const BLACK = "#000000";
+const WHITE = "#ffffff";
+const DARK_GRAY = "rgb(30, 30, 30)";
+const GRID_GRAY = "rgb(50, 50, 50)";
+const GREEN = "rgb(0, 220, 100)";     // Upward trend / Buy
+const RED = "rgb(240, 50, 50)";       // Downward trend / Sell
+const CYAN = "rgb(0, 200, 255)";      // Live price line
+const UI_BG_COLOR = "rgb(18, 18, 18)";
+
+// Chart Layout
+const CHART_WIDTH = 900;
+const CHART_HEIGHT = 580;
+const CHART_X_OFFSET = 80;
+const CHART_Y_OFFSET = 140;
+const BLOCK_WIDTH = 22;
+const BLOCK_SPACING = 6;
+const MAX_DATA_POINTS = Math.floor(CHART_WIDTH / (BLOCK_WIDTH + BLOCK_SPACING));
+
+// Button Layout (Far Right Side)
+const BTN_X = CHART_X_OFFSET + CHART_WIDTH + 20; // 1000
+const BTN_WIDTH = 170;
+const BTN_HEIGHT = 60;
+const BUY_BTN_RECT = { x: BTN_X, y: CHART_Y_OFFSET + 50, width: BTN_WIDTH, height: BTN_HEIGHT };
+const SELL_BTN_RECT = { x: BTN_X, y: CHART_Y_OFFSET + 130, width: BTN_WIDTH, height: BTN_HEIGHT };
+
+// Simulation Parameters
+const STARTING_CASH = 250.00;
+const STARTING_PRICE = 25.00;
+const TICK_VOLATILITY = 0.0015;    // Micro-volatility per frame
+const UPDATE_INTERVAL = 1.0;       // Seconds per main candlestick block
+
+// --- Simulation State ---
+const portfolio = {
+    cash: STARTING_CASH,
+    shares: 1
+};
+
+const price_history = [];
+
+class MarketSimulation {
+    constructor(startPrice) {
+        this.current_price = startPrice;
+        this.block_open_price = startPrice;
+        this.block_high = startPrice;
+        this.block_low = startPrice;
+
+        // Pre-seed chart with initial blocks
+        for (let i = 0; i < 6; i++) {
+            this.finalize_block();
+        }
+    }
+
+    tick_micro_price() {
+        // Simulate real-time price fluctuation and random spike chance
+        const r1 = Math.floor(Math.random() * 1500) + 1;
+        const r2 = Math.floor(Math.random() * 3000) + 1;
+
+        if (r1 === 1) {
+            this.current_price += 100.00;
+        } else if (r2 === 2) {
+            this.current_price = Math.max(1.0, this.current_price - 200.00);
+        } else {
+            const change_pct = (Math.random() * (TICK_VOLATILITY * 2)) - TICK_VOLATILITY;
+            this.current_price = Math.max(1.0, Number((this.current_price * (1 + change_pct)).toFixed(2)));
+        }
+
+        // Track intra-block Highs and Lows
+        this.block_high = Math.max(this.block_high, this.current_price);
+        this.block_low = Math.min(this.block_low, this.current_price);
+    }
+
+    finalize_block() {
+        const open_p = this.block_open_price;
+        const close_p = this.current_price;
+        const high_p = Math.max(this.block_high, open_p, close_p);
+        const low_p = Math.min(this.block_low, open_p, close_p);
+
+        const day_type = close_p >= open_p ? "UP" : "DOWN";
+
+        price_history.push({ day_type, open_p, close_p, high_p, low_p });
+
+        if (price_history.length > MAX_DATA_POINTS) {
+            price_history.shift();
+        }
+
+        // Reset trackers for the new block period
+        this.block_open_price = this.current_price;
+        this.block_high = this.current_price;
+        this.block_low = this.current_price;
+    }
+}
+
+const canvas = document.getElementById("marketCanvas");
+const ctx = canvas.getContext("2d");
+const market = new MarketSimulation(STARTING_PRICE);
+
+// --- Buy & Sell Actions ---
+function buy_share() {
+    const cost = market.current_price;
+    if (portfolio.cash >= cost) {
+        portfolio.cash -= cost;
+        portfolio.shares += 1;
+    }
+}
+
+function sell_share() {
+    if (portfolio.shares >= 1) {
+        const revenue = market.current_price;
+        portfolio.cash += revenue;
+        portfolio.shares -= 1;
+    }
+}
+
+function get_chart_y_pos(price, min_price, max_price) {
+    const price_range = max_price - min_price;
+    if (price_range === 0) {
+        return CHART_Y_OFFSET + Math.floor(CHART_HEIGHT / 2);
+    }
+    const normalized_y = (price - min_price) / price_range;
+    return CHART_Y_OFFSET + CHART_HEIGHT - Math.floor(normalized_y * CHART_HEIGHT);
+}
+
+// Helper: Rounded rectangle equivalent to Pygame's border_radius
+function drawRoundedRect(ctx, x, y, width, height, radius, fillStyle) {
+    ctx.fillStyle = fillStyle;
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + width - radius, y);
+    ctx.arcTo(x + width, y, x + width, y + radius, radius);
+    ctx.lineTo(x + width, y + height - radius);
+    ctx.arcTo(x + width, y + height, x + width - radius, y + height, radius);
+    ctx.lineTo(x + radius, y + height);
+    ctx.arcTo(x, y + height, x, y + height - radius, radius);
+    ctx.lineTo(x, y + radius);
+    ctx.arcTo(x, y, x + radius, y, radius);
+    ctx.closePath();
+    ctx.fill();
+}
+
+// --- UI Rendering ---
+function draw_ui(current_price, time_left) {
+    // Header UI Background
+    ctx.fillStyle = UI_BG_COLOR;
+    ctx.fillRect(0, 0, WIDTH, CHART_Y_OFFSET);
+
+    const net_worth = portfolio.cash + (portfolio.shares * current_price);
+
+    // Left Panel: Cash, Shares, Net Worth
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.font = "bold 20px Arial";
+    ctx.fillStyle = WHITE;
+    ctx.fillText(`Cash: $${portfolio.cash.toFixed(2)}`, 50, 25);
+    ctx.fillText(`Shares: ${portfolio.shares}`, 50, 55);
+
+    ctx.font = "28px Arial";
+    ctx.fillStyle = net_worth >= STARTING_CASH ? GREEN : RED;
+    ctx.fillText(`Net Worth: $${net_worth.toFixed(2)}`, 50, 85);
+
+    // Center/Right Panel: Ticker and Countdown Display
+    ctx.font = "bold 20px Arial";
+    ctx.fillStyle = WHITE;
+    ctx.fillText("SILVER Stock:", CHART_WIDTH - 180, 20);
+
+    ctx.font = "bold 36px Courier New, monospace";
+    ctx.fillStyle = CYAN;
+    ctx.fillText(`$${current_price.toFixed(2)}`, CHART_WIDTH - 180, 50);
+
+    ctx.font = "bold 20px Arial";
+    ctx.fillStyle = WHITE;
+    ctx.fillText(`Next Block: ${Math.floor(time_left)}s`, CHART_WIDTH - 180, 95);
+
+    // Bottom Controls Info
+    ctx.font = "bold 20px Arial";
+    ctx.fillStyle = WHITE;
+    ctx.fillText("Click Buttons or press [B] Buy  |  [S] Sell  |  [Q] Quit", CHART_X_OFFSET, HEIGHT - 45);
+
+    // Clickable Buy / Sell Buttons
+    drawRoundedRect(ctx, BUY_BTN_RECT.x, BUY_BTN_RECT.y, BUY_BTN_RECT.width, BUY_BTN_RECT.height, 8, GREEN);
+    drawRoundedRect(ctx, SELL_BTN_RECT.x, SELL_BTN_RECT.y, SELL_BTN_RECT.width, SELL_BTN_RECT.height, 8, RED);
+
+    // Button Labels
+    ctx.font = "bold 24px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = WHITE;
+    ctx.fillText("BUY", BUY_BTN_RECT.x + BUY_BTN_RECT.width / 2, BUY_BTN_RECT.y + BUY_BTN_RECT.height / 2);
+    ctx.fillText("SELL", SELL_BTN_RECT.x + SELL_BTN_RECT.width / 2, SELL_BTN_RECT.y + SELL_BTN_RECT.height / 2);
+
+    // Reset alignment
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+}
+
+// --- Chart Rendering ---
+function draw_chart(current_price) {
+    if (price_history.length === 0) return;
+
+    // Dynamic Y-axis scale based on history + active price
+    const all_highs = price_history.map(d => d.high_p).concat([market.block_high, current_price]);
+    const all_lows = price_history.map(d => d.low_p).concat([market.block_low, current_price]);
+
+    const max_price = Math.max(...all_highs) * 1.02;
+    const min_price = Math.min(...all_lows) * 0.98;
+
+    // Chart Background
+    ctx.fillStyle = DARK_GRAY;
+    ctx.fillRect(CHART_X_OFFSET, CHART_Y_OFFSET, CHART_WIDTH, CHART_HEIGHT);
+
+    // Grid Lines & Price Labels
+    const num_lines = 6;
+    ctx.font = "bold 20px Arial";
+    ctx.textBaseline = "middle";
+
+    for (let i = 0; i <= num_lines; i++) {
+        const y_pos = CHART_Y_OFFSET + Math.floor(i * (CHART_HEIGHT / num_lines));
+
+        // Horizontal grid line
+        ctx.strokeStyle = GRID_GRAY;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(CHART_X_OFFSET, y_pos + 0.5);
+        ctx.lineTo(CHART_X_OFFSET + CHART_WIDTH, y_pos + 0.5);
+        ctx.stroke();
+
+        // Price label on the left axis
+        const price_val = max_price - (i * (max_price - min_price) / num_lines);
+        ctx.fillStyle = WHITE;
+        ctx.fillText(`$${price_val.toFixed(2)}`, CHART_X_OFFSET - 75, y_pos);
+    }
+
+    // Draw Historical Candlestick Blocks
+    let current_x = CHART_X_OFFSET + BLOCK_SPACING;
+
+    for (const day_data of price_history) {
+        const { day_type, open_p, close_p, high_p, low_p } = day_data;
+
+        const y_open = get_chart_y_pos(open_p, min_price, max_price);
+        const y_close = get_chart_y_pos(close_p, min_price, max_price);
+        const y_high = get_chart_y_pos(high_p, min_price, max_price);
+        const y_low = get_chart_y_pos(low_p, min_price, max_price);
+
+        const color = day_type === "UP" ? GREEN : RED;
+        const top_y = Math.min(y_open, y_close);
+        const body_height = Math.max(4, Math.abs(y_open - y_close));
+
+        // Wicks (High / Low)
+        const center_x = current_x + Math.floor(BLOCK_WIDTH / 2);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(center_x, y_high);
+        ctx.lineTo(center_x, y_low);
+        ctx.stroke();
+
+        // Main Candlestick Body Block
+        ctx.fillStyle = color;
+        ctx.fillRect(current_x, top_y, BLOCK_WIDTH, body_height);
+
+        current_x += BLOCK_WIDTH + BLOCK_SPACING;
+    }
+
+    // Draw Live Active Block / Current Price Tracker
+    const live_y = get_chart_y_pos(current_price, min_price, max_price);
+
+    // Horizontal live price indicator line across the chart
+    ctx.strokeStyle = CYAN;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(CHART_X_OFFSET, live_y + 0.5);
+    ctx.lineTo(CHART_X_OFFSET + CHART_WIDTH, live_y + 0.5);
+    ctx.stroke();
+
+    // Active developing block preview (hollow border)
+    const active_open_y = get_chart_y_pos(market.block_open_price, min_price, max_price);
+    const active_color = current_price >= market.block_open_price ? GREEN : RED;
+    const active_top_y = Math.min(active_open_y, live_y);
+    const active_height = Math.max(4, Math.abs(active_open_y - live_y));
+
+    ctx.strokeStyle = active_color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(current_x + 1, active_top_y, BLOCK_WIDTH - 2, active_height);
+}
+
+// --- Event Listeners & Interaction ---
+let running = true;
+let start_ticks = performance.now();
+
+function isInsideRect(x, y, rect) {
+    return x >= rect.x && x <= rect.x + rect.width &&
+           y >= rect.y && y <= rect.y + rect.height;
+}
+
+canvas.addEventListener("click", (e) => {
+    if (!running) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+
+    if (isInsideRect(x, y, BUY_BTN_RECT)) {
+        buy_share();
+    } else if (isInsideRect(x, y, SELL_BTN_RECT)) {
+        sell_share();
+    }
+});
+
+canvas.addEventListener("mousemove", (e) => {
+    if (!running) {
+        canvas.style.cursor = "default";
+        return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+
+    if (isInsideRect(x, y, BUY_BTN_RECT) || isInsideRect(x, y, SELL_BTN_RECT)) {
+        canvas.style.cursor = "pointer";
+    } else {
+        canvas.style.cursor = "default";
+    }
+});
+
+window.addEventListener("keydown", (e) => {
+    if (!running) return;
+    const key = e.key.toLowerCase();
+    if (key === 'q') {
+        running = false;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+        ctx.fillStyle = WHITE;
+        ctx.font = "bold 36px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText("SIMULATION STOPPED (Press Refresh to Restart)", WIDTH / 2, HEIGHT / 2);
+    } else if (key === 'b') {
+        buy_share();
+    } else if (key === 's') {
+        sell_share();
+    }
+});
+
+// --- Main Simulation Loop ---
+function loop(currentTime) {
+    if (!running) return;
+
+    // 1. Real-time Micro Update
+    market.tick_micro_price();
+
+    // 2. Interval Update (Candlestick period finalize)
+    const seconds_elapsed = (currentTime - start_ticks) / 1000.0;
+    const time_left = Math.max(0, UPDATE_INTERVAL - seconds_elapsed);
+
+    if (seconds_elapsed >= UPDATE_INTERVAL) {
+        market.finalize_block();
+        start_ticks = currentTime;
+    }
+
+    // 3. Rendering
+    ctx.fillStyle = BLACK;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    draw_chart(market.current_price);
+    draw_ui(market.current_price, time_left);
+
+    requestAnimationFrame(loop);
+}
+
+// Start the simulation loop
+requestAnimationFrame((time) => {
+    start_ticks = time;
+    loop(time);
+});
+</script>
+
+</body>
+</html>
+
